@@ -11,7 +11,7 @@ Tu run this script, you'll need:
 ##### Set the script executable :
 `chmod +x ./run.sh`
 ##### Run the script :
-`./cve2cvss
+`./cve2cvss`
 
 ###### Nota :
 - Data from NVD database will be stored in the same directory than the script, and a new folder will be made each time to avoid overwriting

@@ -1,0 +1,140 @@
+#!/bin/bash
+
+# Delay between each requests
+delay=5
+
+# Give up after timeout
+timeout=20
+
+JQ_FilterV2='first(.vulnerabilities.[] | .cve.metrics.cvssMetricV2.[])'
+JQ_FilterV3='first(.vulnerabilities.[] | .cve.metrics.cvssMetricV3.[])'
+JQ_FilterV31='first(.vulnerabilities.[] | .cve.metrics.cvssMetricV31.[])'
+
+JQ=$(whereis jq | awk '{print $2}')
+if [[ -z $JQ ]]
+then
+	echo "jq : dépendance manquante !" >&2
+	exit 1
+fi
+
+# Location is absolute path to current script directory
+loc=$(readlink -f `dirname ${BASH_SOURCE[0]}`)
+
+API='https://services.nvd.nist.gov/rest/json/cves/2.0'
+
+usage(){
+	echo """USAGE:
+	${0##*/} : <file containing cleartext CVEs>
+	"""
+	exit 1
+}
+
+## Checking if file list is set as first argument
+if [[ $# -ne 1 ]]
+then
+	usage
+else
+	CVE_file="$1"
+fi
+
+if [[ ! -r "$CVE_file" ]]
+then
+	echo ${0##*/}"$CVE_file" : no readable >&2
+	exit 1
+fi
+
+# REGEX to harvest valable CVEs only
+CVE_LIST=$(grep -Eo 'CVE-[[:digit:]]{4}-[[:digit:]]{3,}' "$CVE_file")
+
+# Keeping uniq values only
+CVE_LIST=$(echo "$CVE_LIST" | sort | uniq)
+
+if [[ -z $CVE_LIST ]]
+then
+	echo No CVE found in $CVE_file >&2
+fi
+
+# Download in a local directory
+
+mkdir "$loc/CVE_`date +%s`_DB"
+output_dir=$_
+download_dir="$output_dir/data"
+mkdir "$download_dir"
+
+download_cve_data(){
+	for CVE in $CVE_LIST
+	do
+		_ts=`date +%s`
+		_data=$(timeout "$timeout" curl -s "$API?cveId=$CVE")
+		if [[ -z "$_data" ]]
+		then
+			_attente=$((`date +%s` - $_ts))
+			if [[ $_attente -ge $timeout  ]]
+			then
+
+				echo "${0##*/} : $CVE - can't get information from NVD (timeout of $timeout exceeded)" >&2
+			else
+				echo "${0##*/} : $CVE - no answer from API server" >&2
+			fi
+		else
+			echo "$_data" > $download_dir/$CVE.json
+			echo "${0##*/} : [`date +'%Y-%m-%d %H:%M:%S'`] $CVE - JSON data downloaded in $download_dir"
+		fi
+		sleep $delay
+	done
+}
+
+# Download CVE before continuing
+download_cve_data
+
+# Main function
+main(){
+	# List where CVE will be stored
+	NO_DATA=()
+	echo "CVE,version,source,score,severity"
+	for CVE_file in $download_dir/*
+	do
+		CVE=`echo "$CVE_file" | grep -Eo 'CVE-[[:digit:]]{4}-[[:digit:]]{3,15}'`
+		_data=`cat $CVE_file`
+
+
+		_filtered_data_V31=$(echo $_data | jq "$JQ_FilterV31" 2>/dev/null)
+		_filtered_data_V3=$(echo $_data | jq "$JQ_FilterV3" 2>/dev/null)
+		_filtered_data_V2=$(echo $_data | jq "$JQ_FilterV2" 2>/dev/null)
+
+		if [[ -z "$_filtered_data_V31" ]]
+		then
+			if [[ -z "$_filtered_data_V3" ]]
+			then
+				if [[ -z "$_filtered_data_V2" ]]
+				then
+					# No available CVSS scheme for current CVE
+					NO_DATA+=("$CVE")
+					continue
+				else
+					_filtered_data="$_filtered_data_V2"
+					version=2
+				fi
+
+			else
+				_filtered_data="$_filtered_data_V3"
+				version=3
+			fi
+		else
+			_filtered_data="$_filtered_data_V31"
+			version=3.1
+		fi
+		severity=$(echo "$_filtered_data" | jq '.cvssData.baseSeverity' | tr -d '"')
+		score=$(echo "$_filtered_data" | jq '.cvssData.baseScore' | tr -d '"')
+		source=$(echo "$_filtered_data" | jq '.source' | tr -d '"')
+		echo "$CVE,$version,$source,$score,$severity"
+	done
+	if [[ "${#NO_DATA[*]}" -gt 0 ]]
+		then
+		echo "${0##*/} : was not able to get any data for following CVEs:" >&2
+		echo ${NO_DATA[@]} >&2
+	fi
+}
+
+main | tee -a "$output_dir/CVE_CVSS-base_metrics-`date +%s`.csv"
+echo "Done !  Output written in $output_dir/CVE_CVSS-base_metrics-`date +%s`.csv"
